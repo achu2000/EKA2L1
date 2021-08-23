@@ -21,6 +21,7 @@
 #include <common/log.h>
 #include <common/path.h>
 #include <common/time.h>
+#include <common/cvt.h>
 
 #include <loader/rsc.h>
 #include <services/msv/common.h>
@@ -29,6 +30,8 @@
 
 #include <utils/bafl.h>
 #include <utils/err.h>
+
+#include <string>
 
 namespace eka2l1::epoc::msv {
     entry_indexer::entry_indexer(io_system *io, const std::u16string &msg_folder, const language preferred_lang)
@@ -46,12 +49,19 @@ namespace eka2l1::epoc::msv {
                 break;
             }
         }
+        
+        root_entry_.id_ = MSV_ROOT_ID_VALUE;
+        root_entry_.mtm_uid_ = MTM_SERVICE_UID_ROOT;
+        root_entry_.type_uid_ = MTM_SERVICE_UID_ROOT;
+        root_entry_.parent_id_ = epoc::error_not_found;
+        root_entry_.data_ = 0;
+        root_entry_.time_ = common::get_current_time_in_microseconds_since_epoch();
+    }
 
-        if (!load_entries_file(drive_c)) {
-            entries_.clear();
-
-            create_root_entry();
-            create_standard_entries(drive_c);
+    entry_indexer::~entry_indexer() {
+        while (!folders_.empty()) {
+            visible_folder *ff = E_LOFF(folders_.first()->deque(), visible_folder, indexer_link_);
+            delete ff;
         }
     }
 
@@ -65,73 +75,6 @@ namespace eka2l1::epoc::msv {
         std::uint32_t parent_id_;
         std::uint32_t flags_;
     };
-
-    bool entry_indexer::load_entries_file(drive_number crr_drive) {
-        std::u16string msg_entries_file = eka2l1::add_path(msg_dir_, u"Entries.chs");
-
-        // Open the entry file first
-        symfile entry_file = io_->open_file(msg_entries_file, READ_MODE | BIN_MODE);
-
-        if (!entry_file) {
-            LOG_ERROR(SERVICE_MSV, "Unable to open entries file to load entries list!");
-            return false;
-        }
-
-        entry_index_info index_info;
-
-        while (entry_file->valid()) {
-            if (entry_file->read_file(&index_info, sizeof(entry_index_info), 1) != sizeof(entry_index_info)) {
-                break;
-            }
-
-            epoc::msv::entry ent;
-            ent.id_ = index_info.id_;
-            ent.parent_id_ = index_info.parent_id_;
-            ent.service_id_ = index_info.service_id_;
-            ent.flags_ = index_info.flags_;
-
-            entries_.push_back(ent);
-        }
-
-        // Now that we complete the tree, load all the data
-        for (std::size_t i = 0; i < entries_.size(); i++) {
-            if (!load_entry_data(entries_[i])) {
-                LOG_WARN(SERVICE_MSV, "Unable to load entry data for entry ID {}", entries_[i].id_);
-            }
-        }
-
-        return true;
-    }
-
-    bool entry_indexer::update_entries_file(const std::size_t entry_pos_start) {
-        std::u16string msg_entries_file = eka2l1::add_path(msg_dir_, u"Entries.chs");
-
-        // Open the entry file first
-        symfile entry_file = io_->open_file(msg_entries_file, WRITE_MODE | BIN_MODE);
-
-        if (!entry_file) {
-            LOG_ERROR(SERVICE_MSV, "Unable to open entries file to update entries list!");
-            return false;
-        }
-
-        entry_file->seek(entry_pos_start * sizeof(entry_index_info), file_seek_mode::beg);
-
-        for (std::size_t i = entry_pos_start; i < entries_.size(); i++) {
-            entry_index_info index_info;
-
-            index_info.id_ = entries_[i].id_;
-            index_info.parent_id_ = entries_[i].parent_id_;
-            index_info.service_id_ = entries_[i].service_id_;
-            index_info.flags_ = entries_[i].flags_;
-
-            if (entry_file->write_file(&index_info, sizeof(entry_index_info), 1) != sizeof(entry_index_info)) {
-                LOG_ERROR(SERVICE_MSV, "Unable to update MSV entry number {} (write failure)", i);
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     enum msv_folder_type {
         MSV_FOLDER_TYPE_NORMAL = 0,
@@ -165,161 +108,11 @@ namespace eka2l1::epoc::msv {
 
     std::optional<std::u16string> entry_indexer::get_entry_data_file(entry &ent) {
         std::u16string file_path = eka2l1::add_path(msg_dir_, get_folder_name(ent.service_id_, MSV_FOLDER_TYPE_SERVICE));
-        entry *back_trace = &ent;
-
-        std::u16string parent_dir;
-
-        while (back_trace->parent_id_ != epoc::error_not_found) {
-            parent_dir = get_folder_name(ent.parent_id_, MSV_FOLDER_TYPE_PATH) + u"\\" + parent_dir;
-
-            entry my_parent;
-            my_parent.id_ = back_trace->parent_id_;
-
-            auto ent_ite = std::lower_bound(entries_.begin(), entries_.end(), my_parent, msv_entry_comparator);
-
-            if ((ent_ite == entries_.end()) || (ent_ite->id_ != back_trace->parent_id_)) {
-                break;
-            }
-
-            back_trace = &(*ent_ite);
-        }
-
-        file_path = eka2l1::add_path(file_path, parent_dir);
-
         if (!io_->exist(file_path)) {
             io_->create_directories(file_path);
         }
 
-        return eka2l1::add_path(file_path, get_folder_name(ent.id_, MSV_FOLDER_TYPE_NORMAL));
-    }
-
-    bool entry_indexer::save_entry_data(entry &ent) {
-        // Access the service folder first
-        std::optional<std::u16string> file_path = get_entry_data_file(ent);
-
-        if (!file_path) {
-            LOG_ERROR(SERVICE_MSV, "Unable to construct entry data path for entry ID {}", ent.id_);
-            return false;
-        }
-
-        symfile entry_file = io_->open_file(file_path.value(), WRITE_MODE | BIN_MODE);
-
-        if (!entry_file) {
-            LOG_ERROR(SERVICE_MSV, "Unable to open entry data file!");
-            return false;
-        }
-
-        wo_file_stream entry_file_stream(entry_file.get());
-
-        entry_file_stream.write(&ent.id_, sizeof(std::uint32_t));
-        entry_file_stream.write(&ent.parent_id_, sizeof(std::int32_t));
-        entry_file_stream.write(&ent.service_id_, sizeof(std::uint32_t));
-        entry_file_stream.write(&ent.type_uid_, sizeof(epoc::uid));
-        entry_file_stream.write(&ent.mtm_uid_, sizeof(epoc::uid));
-        entry_file_stream.write(&ent.data_, sizeof(std::uint32_t));
-
-        entry_file_stream.write_string(ent.description_);
-        entry_file_stream.write_string(ent.details_);
-
-        entry_file_stream.write(&ent.time_, sizeof(std::uint64_t));
-        entry_file_stream.write(&ent.flags_, sizeof(std::uint32_t));
-
-        return true;
-    }
-
-    bool entry_indexer::load_entry_data(entry &ent) {
-        // Access the service folder first
-        std::optional<std::u16string> file_path = get_entry_data_file(ent);
-
-        if (!file_path) {
-            LOG_ERROR(SERVICE_MSV, "Unable to construct entry data path for entry ID {}", ent.id_);
-            return false;
-        }
-
-        symfile entry_file = io_->open_file(file_path.value(), READ_MODE | BIN_MODE);
-
-        if (!entry_file) {
-            LOG_ERROR(SERVICE_MSV, "Unable to open entry data file!");
-            return false;
-        }
-
-        ro_file_stream entry_file_stream(entry_file.get());
-
-        entry_file_stream.read(&ent.id_, sizeof(std::uint32_t));
-        entry_file_stream.read(&ent.parent_id_, sizeof(std::int32_t));
-        entry_file_stream.read(&ent.service_id_, sizeof(std::uint32_t));
-        entry_file_stream.read(&ent.type_uid_, sizeof(epoc::uid));
-        entry_file_stream.read(&ent.mtm_uid_, sizeof(epoc::uid));
-        entry_file_stream.read(&ent.data_, sizeof(std::uint32_t));
-
-        ent.description_ = entry_file_stream.read_string<char16_t>();
-        ent.details_ = entry_file_stream.read_string<char16_t>();
-
-        entry_file_stream.read(&ent.time_, sizeof(std::uint64_t));
-        entry_file_stream.read(&ent.flags_, sizeof(std::uint32_t));
-
-        return true;
-    }
-
-    entry *entry_indexer::get_entry(const std::uint32_t id) {
-        entry ent;
-        ent.id_ = id;
-
-        auto ite_pos = std::lower_bound(entries_.begin(), entries_.end(), ent, msv_entry_comparator);
-        if ((ite_pos == entries_.end()) || (ite_pos->id_ != id)) {
-            return nullptr;
-        }
-
-        return &(*ite_pos);
-    }
-
-    std::vector<entry *> entry_indexer::get_entries_by_parent(const std::uint32_t parent_id) {
-        // TODO: Build a lookup map to increase speed.
-        std::vector<entry *> ents;
-
-        for (auto &entry : entries_) {
-            if (entry.parent_id_ == parent_id) {
-                ents.push_back(&entry);
-            }
-        }
-
-        return ents;
-    }
-
-    bool entry_indexer::add_entry(entry &ent) {
-        ent.flags_ = entry::STATUS_PRESENT;
-
-        // Find an entry with existing ID, if it exists then this entry will not be added.
-        if (std::binary_search(entries_.begin(), entries_.end(), ent, msv_entry_comparator)) {
-            return false;
-        }
-
-        // Add this entry. And sort by ID
-        entries_.push_back(ent);
-        std::sort(entries_.begin(), entries_.end(), msv_entry_comparator);
-
-        // Find the entry again in this sort list, and update the entries file from this position.
-        auto ite_pos = std::lower_bound(entries_.begin(), entries_.end(), ent, msv_entry_comparator);
-        const std::size_t start_update_pos = std::distance(entries_.begin(), ite_pos);
-
-        if (!update_entries_file((start_update_pos == 0) ? 0 : (start_update_pos - 1))) {
-            return false;
-        }
-
-        // Save this entry to the correspond folder
-        return save_entry_data(*ite_pos);
-    }
-
-    bool entry_indexer::create_root_entry() {
-        epoc::msv::entry root_entry;
-        root_entry.id_ = 0x1000;
-        root_entry.mtm_uid_ = MTM_SERVICE_UID_ROOT;
-        root_entry.type_uid_ = MTM_SERVICE_UID_ROOT;
-        root_entry.parent_id_ = epoc::error_not_found;
-        root_entry.data_ = 0;
-        root_entry.time_ = common::get_current_time_in_microseconds_since_epoch();
-
-        return add_entry(root_entry);
+        return eka2l1::add_path(file_path, eka2l1::add_path(fmt::format(u"\\{:X}\\", ent.id_ & 0xF), get_folder_name(ent.id_, MSV_FOLDER_TYPE_NORMAL)));
     }
 
     bool entry_indexer::create_standard_entries(drive_number crr_drive) {
@@ -378,4 +171,366 @@ namespace eka2l1::epoc::msv {
 
         return true;
     }
-};
+    
+    entry *entry_indexer::add_entry(entry &ent) {
+        // Provide that the proper visible folder has been found
+        common::double_linked_queue_element *first = folders_.first();
+        common::double_linked_queue_element *end = folders_.end();
+
+        do {
+            visible_folder *folder = E_LOFF(first, visible_folder, index_link_);
+            if (folder->id() == ent.visible_id_) {
+                return folder->add(ent);
+            }
+
+            first = first->next;
+        } while (first != end);
+
+        // It's a shame really. No folder for this? We shall creates one
+        visible_folder *new_folder = new visible_folder(ent.visible_id_);
+        entry *fin = new_folder->add(ent);
+
+        folders_.push(nwe_folder);
+
+        return fin;
+    }
+    
+    entry *entry_indexer::get_entry(const std::uint32_t id) {
+        if (id == MSV_ROOT_ID_VALUE) {
+            return &root_entry_;
+        }
+
+        // WHERE IS IT!!!!! Get out aaaaaaaa
+        common::double_linked_queue_element *first = folders_.first();
+        common::double_linked_queue_element *end = folders_.end();
+
+        do {
+            visible_folder *folder = E_LOFF(first, visible_folder, index_link_);
+            if (auto result = folder->get_entry(id)) {
+                result;
+            }
+
+            first = first->next;
+        } while (first != end);
+
+        return nullptr;
+    }
+
+    sql_entry_indexer::sql_entry_indexer(io_system *io, const std::u16string &msg_folder, const language preferred_lang)
+        : entry_indexer(io, msg_folder, preferred_lang)
+        , database_(nullptr)
+        , create_entry_stmt_(nullptr)
+        , visible_folder_find_stmt_(nullptr)
+        , find_entry_stmt_(nullptr)
+        , id_counter_(MSV_FIRST_FREE_ENTRY_ID) {
+        load_or_create_databases();
+    }
+
+    sql_entry_indexer::~sql_entry_indexer() {
+        if (create_entry_stmt_) {
+            sqlite3_finalize(create_entry_stmt_);
+        }
+
+        if (visible_folder_find_stmt_) {
+            sqlite3_finalize(visible_folder_find_stmt_);
+        }
+
+        if (find_entry_stmt_) {
+            sqlite3_finalize(find_entry_stmt_);
+        }
+
+        if (database_) {
+            sqlite3_close(database_);
+        }
+    }
+
+    static constexpr std::uint32_t MSV_SQL_DATABASE_VERSION = 2;
+    
+    bool sql_entry_indexer::load_or_create_databases() {
+        const std::u16string root = eka2l1::root_name(msg_dir_, true);
+        drive_number database_reside = drive_c;
+
+        if (root.length() > 1) {
+            database_reside = char16_to_drive(root[0]);
+        }
+
+        std::optional<std::u16string> database_real_path = io_->get_raw_path(fmt::format(u"{}:\\messaging.db", database_reside));
+        if (!database_real_path) {
+            LOG_ERROR(SERVICE_MSV, "Can't retrieve messaging database path!");
+            return false;
+        }
+
+        std::string database_path_u8 = common::ucs2_to_utf8(database_real_path.value());
+        if (sqlite3_open(database_path_u8.c_str(), &database_) != SQLITE_OK) {
+            LOG_ERROR(SERVICE_MSV, "Fail to establish messaging database!");
+            return false;
+        }
+
+        // Create some fundamental tables to store our msg entries
+        const char *INDEX_ENTRY_TABLE_CREATE_STM = "CREATE TABLE IF NOT EXISTS IndexEntry("
+            "id INTEGER,"
+            "parentId INTEGER,"
+            "serviceId INTEGER,"
+            "mtmId INTEGER,"
+            "type INTEGER,"
+            "date INTEGER,"
+            "data INTEGER,"
+            "size INTEGER,"
+            "error INTEGER,"
+            "mtmData1 INTEGER,"
+            "mtmData2 INTEGER,"
+            "mtmData3 INTEGER,"
+            "relatedId INTEGER,"
+            "bioType INTEGER,"
+            "pcSyncCount INTEGER,"
+            "reserved INTEGER,"
+            "visibleParent INTEGER,"
+            "description TEXT,"
+            "details TEXT,"
+            "PRIMARY KEY (id)"
+            ");";
+
+        if (sqlite3_exec(database_, INDEX_ENTRY_TABLE_CREATE_STM, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            LOG_ERROR(SERVICE_MSV, "Fail to create index entry table!");
+            return false;
+        }
+
+        // Follow Symbian footsteps, since there are opcodes which lurk up entries with specific parent id,
+        // create an index for it
+        const char *INDEX_ENTRY_CREATE_PARENT_ID_INDEX_STM = "CREATE INDEX IF NOT EXISTS IndexEntry_ParentIndex ON IndexEntry(parentId);";
+        
+        if (sqlite3_exec(database_, INDEX_ENTRY_CREATE_PARENT_ID_INDEX_STM, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            LOG_WARN(SERVICE_MSV, "Fail to create index entry's parent indexing!");
+        }
+
+        // Create version table
+        const char *VERSION_TABLE_CREATE_STM = "CREATE IF NOT EXISTS VersionTable(version INTEGER PRIMARY KEY);";
+
+        if (sqlite3_exec(database_, VERSION_TABLE_CREATE_STM, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            LOG_WARN(SERVICE_MSV, "Fail to create version table!");
+        } else {
+            // Add the versioning
+            std::string VERSION_TABLE_ADD_VERSION_STM = fmt::format("INSERT INTO VersionTable Values ({});", MSV_SQL_DATABASE_VERSION);
+            if (sqlite3_exec(database_, VERSION_TABLE_ADD_VERSION_STM.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK) {
+                LOG_WARN(SERVICE_MSV, "Can't add version number to version table!");
+            }
+        }
+
+        // Get the ID counter starting value. This is ID of last entry added
+        const char *MAX_ID_GET_STM = "SELECT MAX(id) FROM IndexEntry;";
+        sqlite3_stmt *max_id_get_stmt_obj = nullptr;
+        
+        if (sqlite3_prepare(database_, MAX_ID_GET_STM, sizeof(MAX_ID_GET_STM), &max_id_get_stmt_obj, nullptr) == SQLITE_OK) {
+            const int res = sqlite3_step(max_id_get_stmt_obj);
+            if (res == SQLITE_OK) {
+                // Well, we got one result, let's see it
+                id_counter_ = static_cast<std::uint32_t>(sqlite3_column_int(max_id_get_stmt_obj, 0));
+            }
+
+            sqlite3_finalize(max_id_get_stmt_obj);
+        } else {
+            LOG_WARN(SERVICE_MSV, "Can't get max ID for ID counter!");
+        }
+
+        return true;
+    }
+    
+    msv_id sql_entry_indexer::get_suitable_visible_parent_id(const msv_id parent_id) {
+        // Try to find the parent entry in cache first
+        entry *parent_ent = entry_indexer::get_entry(parent_id);
+        if (parent_ent) {
+            if (!parent_ent->visible_folder()) {
+                return parent_ent->visible_id_;
+            } else {
+                return parent_id;
+            }
+        }
+
+        // Conduct a search in the database
+        if (!visible_folder_find_stmt_) {
+            const char *FIND_SUITABLE_VISIBLE_PARENT_STMT = "SELECT data, visibleParent FROM IndexEntry WHERE id=:parentId";
+            if (sqlite3_prepare(database_, FIND_SUITABLE_VISIBLE_PARENT_STMT, sizeof(FIND_SUITABLE_VISIBLE_PARENT_STMT),
+                &visible_folder_find_stmt_, nullptr) != SQLITE_OK) {
+                LOG_ERROR(SERVICE_MSV, "Unable to prepare find visible folder statement!");
+                return 0;
+            }
+        }
+
+        sqlite3_reset(visible_folder_find_stmt_);
+
+        if (sqlite3_bind_int(visible_folder_find_stmt_, 1, parent_id) != SQLITE_OK) {
+            LOG_ERROR(SERVICE_MSV, "Fail to bind parent id to visible folder find statement");
+            return 0;
+        }
+
+        // Only step one time, as only one entry should exists
+        const int res = sqlite3_step(visible_folder_find_stmt_);
+        msv_id result_id = 0;
+
+        if ((res == SQLITE_OK) || (res == SQLITE_DONE)) {
+            const int data = sqlite3_column_int(visible_folder_find_stmt_, 0);
+            const std::uint32_t visible_folder_id = static_cast<std::uint32_t>(sqlite3_column_int(visible_folder_find_stmt_, 1));
+
+            if (data & entry::DATA_FLAG_INVISIBLE) {
+                return visible_folder_id;
+            }
+
+            return parent_id;
+        }
+
+        return result_id;
+    }
+
+    bool sql_entry_indexer::add_entry(entry &ent) {
+        if (!create_entry_stmt_) {
+            const char *CREATE_ENTRY_STMT_STRING = "INSERT INTO IndexEntry VALUES("
+                ":id, :parentId, :serviceId, :mtmId, :type, :date, :data, :size, :error, :mtmData1,"
+                ":mtmData2, :mtmData3, :relatedId, :bioType, :pcSyncCount, :reserved, :visibleParent,"
+                ":description, :details)";
+
+            if (sqlite3_prepare(database_, CREATE_ENTRY_STMT_STRING, sizeof(CREATE_ENTRY_STMT_STRING), &create_entry_stmt_, nullptr) != SQLITE_OK) {
+                LOG_ERROR(SERVICE_MSV, "Unable to prepare index entry insert statement!");
+                return false;
+            }
+        }
+
+        sqlite3_reset(create_entry_stmt_);
+
+        // We want to first find a good visible folder for this entry
+        const msv_id visible_folder_id = get_suitable_visible_parent_id(ent.parent_id_);
+        if (visible_folder_id == 0) {
+            return false;
+        }
+
+        // Get a new entry slot for us all
+        ent.id_ = id_counter_ + 1;
+        ent.visible_id_ = visible_folder_id;
+
+        // Parent's visbility affects child visiblity
+        // The fact that the visible folder ID retrieved not equals to parent ID, means that
+        // the parent entry is not a visible folder. So the child can not be too
+        if (ent.parent_id_ == visible_folder_id) {
+            if (ent.visible() && ((ent.type_uid_ == MSV_SERVICE_UID) || (ent.type_uid_ == MSV_FOLDER_UID))) {
+                ent.visible_folder(true);
+            } else {
+                ent.visible_folder(false);
+            }
+        } else {
+            ent.visible_folder(false);
+        }
+
+        // Let's bind value to add in the database
+        sqlite3_bind_int(create_entry_stmt_, 1, static_cast<int>(ent.id_));
+        sqlite3_bind_int(create_entry_stmt_, 2, static_cast<int>(ent.parent_id_));
+        sqlite3_bind_int(create_entry_stmt_, 3, static_cast<int>(ent.service_id_));
+        sqlite3_bind_int(create_entry_stmt_, 4, static_cast<int>(ent.mtm_uid_));
+        sqlite3_bind_int(create_entry_stmt_, 5, static_cast<int>(ent.type_uid_));
+        sqlite3_bind_int64(create_entry_stmt_, 6, static_cast<sqlite_int64>(ent.time_));
+        sqlite3_bind_int(create_entry_stmt_, 7, static_cast<int>(ent.data_));
+        sqlite3_bind_int(create_entry_stmt_, 8, static_cast<int>(ent.size_));
+        sqlite3_bind_int(create_entry_stmt_, 9, static_cast<int>(ent.error_));
+        sqlite3_bind_int(create_entry_stmt_, 10, static_cast<int>(ent.mtm_datas_[0]));
+        sqlite3_bind_int(create_entry_stmt_, 11, static_cast<int>(ent.mtm_datas_[1]));
+        sqlite3_bind_int(create_entry_stmt_, 12, static_cast<int>(ent.mtm_datas_[2]));
+        sqlite3_bind_int(create_entry_stmt_, 13, static_cast<int>(ent.related_id_));
+        sqlite3_bind_int(create_entry_stmt_, 14, static_cast<int>(ent.bio_type_));
+        sqlite3_bind_int(create_entry_stmt_, 15, static_cast<int>(ent.pc_sync_count_));
+        sqlite3_bind_int(create_entry_stmt_, 16, static_cast<int>(ent.reserved_));
+        sqlite3_bind_int(create_entry_stmt_, 17, static_cast<int>(ent.visible_id_));
+        sqlite3_bind_text16(create_entry_stmt_, 18, ent.description_.c_str(), static_cast<int>(ent.description_.size()), nullptr);
+        sqlite3_bind_text16(create_entry_stmt_, 19, ent.details_.c_str(), static_cast<int>(ent.details_.size()), nullptr);
+
+        if (sqlite3_step(create_entry_stmt_) != SQLITE_DONE) {
+            LOG_ERROR(SERVICE_MSV, "Failed to add entry to database!");
+            return false;
+        }
+
+        id_counter_++;
+        
+        return entry_indexer::add_entry(ent);
+    }
+
+    entry *sql_entry_indexer::get_entry(const std::uint32_t id) {
+        // Lookup in the cache first
+        entry *result = entry_indexer::get_entry(id);
+        if (!result) {
+            // This time try to look in the database, see what can we gather
+            if (!find_entry_stmt_) {
+                static const char *FIND_ENTRY_STR_STM = "SELECT parentId, serviceId, mtmId, type, date, data, size, error, mtmData1,"
+                    "mtmData2, mtmData3, relatedId, bioType, pcSyncCount, reserved, visibleParent,"
+                    "description, details from IndexEntry WHERE id=:id";
+
+                if (sqlite3_prepare(database_, FIND_ENTRY_STR_STM, sizeof(FIND_ENTRY_STR_STM), &find_entry_stmt_, nullptr) != SQLITE_OK) {
+                    LOG_ERROR(SERVICE_MSV, "Unable to prepare find entry statement!");
+                    return false;
+                }
+            }
+
+            sqlite3_reset(find_entry_stmt_);
+            if (sqlite3_bind_int(find_entry_stmt_, 1, id) != SQLITE_OK) {
+                LOG_ERROR(SERVICE_MSV, "Unable to bind id to find entry in database!");
+                return nullptr;
+            }
+
+            const int result = sqlite3_step(find_entry_stmt_);
+            if (result == SQLITE_DONE) {
+                // Nothing found
+                return nullptr;
+            }
+
+            // There should be no possbility of duplicated entries. But in case, only take the first one
+            entry the_entry;
+            the_entry.id_ = id;
+            the_entry.parent_id_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 0));
+            the_entry.service_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 1));
+            the_entry.mtm_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 2));
+            the_entry.type_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 3));
+            the_entry.time_ = static_cast<std::uint64_t>(sqlite3_column_int64(find_entry_stmt_, 4));
+            the_entry.data_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 5));
+            the_entry.size_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 6));
+            the_entry.error_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 7));
+            the_entry.mtm_datas_[0] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 8));
+            the_entry.mtm_datas_[1] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 9));
+            the_entry.mtm_datas_[2] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 10));
+            the_entry.related_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 11));
+            the_entry.bio_type_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 12));
+            the_entry.pc_sync_count_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 13));
+            the_entry.reserved_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 14));
+            the_entry.visible_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 15));
+            the_entry.description_ = std::u16string(reinterpret_cast<char16_t*>(sqlite3_column_text16(find_entry_stmt_, 16)));
+            the_entry.details_ = std::u16string(reinterpret_cast<char16_t*>(sqlite3_column_text16(find_entry_stmt_, 17)));
+
+            // Add to cache and receive the temporary pointer to it.
+            return entry_indexer::add_entry(the_entry);
+        }
+
+        return nullptr;
+    }
+
+    std::vector<entry *> sql_entry_indexer::get_entries_by_parent(const std::uint32_t parent_id) {
+        visible_folder_children_query_error error = visible_folder_children_query_ok;
+        std::vector<entry*> entries;
+
+        // Find the visible folder that parent stays in, if not complete, do db queries...
+        msv_id visible_folder_id = get_suitable_visible_parent_id(parent_id);
+        
+        common::double_linked_queue_element *first = folders_.first();
+        common::double_linked_queue_element *end = folders_.end();
+
+        do {
+            visible_folder *ff = E_LOFF(first, visible_folder, indexer_link_);
+            if (ff->id() == visible_folder_id) {
+                entries = ff->get_children_by_parent(parent_id, &error);
+                if (error == visible_folder_children_query_no_child_id_array) {
+
+                } else if (error == visible_folder_children_incomplete) {
+                    // Query all entries and then do transformation
+                }
+            }
+
+            first = first->next;
+        } while (first != end);
+
+        return entries;
+    }
+}

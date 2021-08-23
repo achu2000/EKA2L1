@@ -105,7 +105,7 @@ namespace eka2l1 {
         reg_.load_mtm_list();
         install_rom_mtm_modules();
 
-        indexer_ = std::make_unique<epoc::msv::entry_indexer>(io, message_folder_, sys->get_system_language());
+        indexer_ = std::make_unique<epoc::msv::sql_entry_indexer>(io, message_folder_, sys->get_system_language());
 
         inited_ = true;
     }
