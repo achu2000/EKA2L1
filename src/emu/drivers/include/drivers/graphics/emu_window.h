@@ -137,6 +137,8 @@ namespace eka2l1 {
             std::function<void(void *)> close_hook;
 
             std::function<void(void *, std::uint32_t)> char_hook;
+    
+            std::function<void()> repaint_request;
         };
 
         std::unique_ptr<emu_window> new_emu_window(const window_api win_type);

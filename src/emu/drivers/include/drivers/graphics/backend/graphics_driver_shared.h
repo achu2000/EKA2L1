@@ -68,6 +68,8 @@ namespace eka2l1::drivers {
         glm::mat4 projection_matrix;
         eka2l1::vecx<float, 4> brush_color;
 
+        std::mutex lock_;
+
         drivers::handle append_graphics_object(graphics_object_instance &instance);
         bool delete_graphics_object(const drivers::handle handle);
         graphics_object *get_graphics_object(const drivers::handle num);

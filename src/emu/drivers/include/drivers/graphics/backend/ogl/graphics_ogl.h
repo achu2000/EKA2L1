@@ -29,6 +29,8 @@
 
 #include <memory>
 #include <queue>
+#include <map>
+#include <thread>
 
 namespace eka2l1::drivers {
     struct ogl_state {
@@ -58,11 +60,11 @@ namespace eka2l1::drivers {
         std::unique_ptr<ogl_shader> fill_program;
         std::unique_ptr<ogl_shader> mask_program;
 
-        GLuint sprite_vao;
+        std::map<std::thread::id, GLuint> sprite_vao;
         GLuint sprite_vbo;
         GLuint sprite_ibo;
 
-        GLuint fill_vao;
+        std::map<std::thread::id, GLuint> fill_vao;
         GLuint fill_vbo;
 
         GLint color_loc;
@@ -94,6 +96,9 @@ namespace eka2l1::drivers {
 
         bool is_gles;
 
+        std::function<GLuint()> generate_sprite_vao;
+        std::function<GLuint()> generate_fill_vao;
+
         void do_init();
 
         void clear(command_helper &helper);
@@ -123,6 +128,7 @@ namespace eka2l1::drivers {
         void set_viewport(const eka2l1::rect &viewport) override;
         std::unique_ptr<graphics_command_list> new_command_list() override;
         void submit_command_list(graphics_command_list &command_list) override;
+        void execute_command_list(graphics_command_list &command_list) override;
         std::unique_ptr<graphics_command_list_builder> new_command_builder(graphics_command_list *list) override;
 
         void run() override;

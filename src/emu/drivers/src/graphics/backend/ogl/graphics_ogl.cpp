@@ -93,25 +93,39 @@ namespace eka2l1::drivers {
             0, 3, 1
         };
 
-        // Make sprite VAO and VBO
-        glGenVertexArrays(1, &sprite_vao);
         glGenBuffers(1, &sprite_vbo);
-        glBindVertexArray(sprite_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, sprite_vbo);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (GLvoid *)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (GLvoid *)(2 * sizeof(GLfloat)));
-        glBindVertexArray(0);
+
+        // Make sprite VAO and VBO
+        generate_sprite_vao = [&]() -> GLuint {
+            GLuint result = 0;
+
+            glGenVertexArrays(1, &result);
+            glBindVertexArray(result);
+            glBindBuffer(GL_ARRAY_BUFFER, sprite_vbo);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (GLvoid *)0);
+            glEnableVertexAttribArray(1);
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (GLvoid *)(2 * sizeof(GLfloat)));
+            glBindVertexArray(0);
+
+            return result;
+        };
+
+        glGenBuffers(1, &fill_vbo);
 
         // Make fill VAO and VBO
-        glGenVertexArrays(1, &fill_vao);
-        glGenBuffers(1, &fill_vbo);
-        glBindVertexArray(fill_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, fill_vbo);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), (GLvoid *)0);
-        glBindVertexArray(0);
+        generate_fill_vao = [&]() -> GLuint {
+            GLuint result = 0;
+
+            glGenVertexArrays(1, &result);
+            glBindVertexArray(result);
+            glBindBuffer(GL_ARRAY_BUFFER, fill_vbo);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), (GLvoid *)0);
+            glBindVertexArray(0);
+
+            return result;
+        };
 
         glGenBuffers(1, &sprite_ibo);
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, sprite_ibo);
@@ -177,7 +191,17 @@ namespace eka2l1::drivers {
             1.0f,
         };
 
-        glBindVertexArray(fill_vao);
+        std::thread::id tid = std::this_thread::get_id();
+        GLuint fill_vao_val = 0;
+
+        if (fill_vao.find(tid) == fill_vao.end()) {
+            fill_vao_val = generate_fill_vao();
+            sprite_vao.emplace(tid, fill_vao_val);
+        } else {
+            fill_vao_val = fill_vao[tid];
+        }
+
+        glBindVertexArray(fill_vao_val);
         glBindBuffer(GL_ARRAY_BUFFER, fill_vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(fill_verts_default), nullptr, GL_STATIC_DRAW);
         glBufferData(GL_ARRAY_BUFFER, sizeof(fill_verts_default), fill_verts_default, GL_STATIC_DRAW);
@@ -300,7 +324,17 @@ namespace eka2l1::drivers {
             vert_pointer = verts;
         }
 
-        glBindVertexArray(sprite_vao);
+        std::thread::id tid = std::this_thread::get_id();
+        GLuint sprite_vao_val = 0;
+
+        if (sprite_vao.find(tid) == sprite_vao.end()) {
+            sprite_vao_val = generate_sprite_vao();
+            sprite_vao.emplace(tid, sprite_vao_val);
+        } else {
+            sprite_vao_val = sprite_vao[tid];
+        }
+
+        glBindVertexArray(sprite_vao_val);
         glBindBuffer(GL_ARRAY_BUFFER, sprite_vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), nullptr, GL_STATIC_DRAW);
         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), vert_pointer, GL_STATIC_DRAW);
@@ -876,6 +910,8 @@ namespace eka2l1::drivers {
         while (!should_stop) {
             std::optional<server_graphics_command_list> list = list_queue.pop();
 
+            const std::lock_guard<std::mutex> guard(lock_);
+
             if (!list) {
                 LOG_ERROR(DRIVER_GRAPHICS, "Corrupted graphics command list! Emulation halt.");
                 break;
@@ -893,6 +929,25 @@ namespace eka2l1::drivers {
                 delete cmd;
                 cmd = next;
             }
+        }
+    }
+
+    void ogl_graphics_driver::execute_command_list(graphics_command_list &command_list) {
+        const std::lock_guard<std::mutex> guard(lock_);
+
+        server_graphics_command_list &nlist = static_cast<server_graphics_command_list&>(command_list);
+
+        command *cmd = nlist.list_.first_;
+        command *next = nullptr;
+
+        while (cmd) {
+            dispatch(cmd);
+            next = cmd->next_;
+
+            // TODO: If any command list requires not rebuilding the buffer, dont delete the command.
+            // For now, not likely
+            delete cmd;
+            cmd = next;
         }
     }
 

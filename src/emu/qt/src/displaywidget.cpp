@@ -20,25 +20,23 @@
 #include <common/algorithm.h>
 #include <common/log.h>
 #include <qt/displaywidget.h>
+#include <drivers/graphics/graphics.h>
 
 #include <QWindow>
 #include <QOpenGLContext>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QHBoxLayout>
 
-display_widget::display_widget(QWidget *parent)
-    : QWidget(parent)
-    , userdata_(nullptr)
+display_window::display_window(QWindow *parent, display_widget *container)
+    : QWindow(parent) 
     , display_context_(nullptr)
-    , shared_display_context_(nullptr) // For vulkan this may stay null all over
-{
-    setAttribute(Qt::WA_PaintOnScreen);
-    setAttribute(Qt::WA_NativeWindow);
-
-    setMouseTracking(false);
-
-    windowHandle()->setSurfaceType(QWindow::OpenGLSurface);
-    windowHandle()->create();
+    , shared_display_context_(nullptr)   // For vulkan this may stay null all over
+    , offscreen_surface_(nullptr)
+    , container_(container)
+    , main_made_(false) {
+    setSurfaceType(QWindow::OpenGLSurface);
+    create();
 
     static constexpr std::int32_t TOTAL_TRY = 3;
 
@@ -57,6 +55,8 @@ display_widget::display_widget(QWidget *parent)
         format_needed.setSwapInterval(0);
 
         display_context_->setFormat(format_needed);
+        display_context_->setParent(this);
+
         if (display_context_->create()) {
             success = true;
             break;
@@ -71,15 +71,20 @@ display_widget::display_widget(QWidget *parent)
     }
 }
 
-display_widget::~display_widget() {
+display_window::~display_window() {
+    display_context_->doneCurrent();
+
     if (shared_display_context_)
         delete shared_display_context_;
 
     if (display_context_)
         delete display_context_;
+
+    if (offscreen_surface_)
+        delete offscreen_surface_;
 }
 
-void display_widget::init(std::string title, eka2l1::vec2 size, const std::uint32_t flags) {
+void display_window::init(eka2l1::vec2 size) {
     // This is usally called from another thread :D
     // Create shared contexts
     shared_display_context_ = new QOpenGLContext;
@@ -90,20 +95,98 @@ void display_widget::init(std::string title, eka2l1::vec2 size, const std::uint3
         LOG_ERROR(eka2l1::FRONTEND_UI, "Unable to create shared OpenGL context for worker thread!");
     }
 
+    offscreen_surface_ = new QOffscreenSurface(nullptr);
+
+    offscreen_surface_->setParent(display_context_->parent());
+    offscreen_surface_->setFormat(display_context_->format());
+    offscreen_surface_->create();
+}
+
+void display_window::make_current() {
+    shared_display_context_->makeCurrent(offscreen_surface_);
+}
+
+void display_window::done_current() {
+    shared_display_context_->doneCurrent();
+}
+
+void display_window::swap_buffer() {
+    display_context_->swapBuffers(this);
+}
+
+bool display_window::event(QEvent *event) {
+    if (event->type() == QEvent::UpdateRequest) {
+        if (container_->repaint_request) {
+            if (!main_made_) {
+                main_made_ = true;
+            }
+
+            display_context_->makeCurrent(this);
+            container_->repaint_request();
+        }
+
+        requestUpdate();
+        return true;
+    }
+
+    return QWindow::event(event);
+}
+
+void display_window::exposeEvent(QExposeEvent *event) {
+    requestUpdate();
+    QWindow::exposeEvent(event);
+}
+
+display_widget::display_widget(QWidget *parent)
+    : QWidget(parent)
+    , userdata_(nullptr)
+    , win_(nullptr)
+{
+    setAttribute(Qt::WA_PaintOnScreen);
+    setAttribute(Qt::WA_NativeWindow);
+
+    setMouseTracking(false);
+    
+    win_ = new display_window(qobject_cast<QWindow*>(parent), this);
+    win_container_ = createWindowContainer(win_, this);
+    
+    QHBoxLayout *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(win_container_);
+
+    setLayout(layout);
+}
+
+display_widget::~display_widget() {
+    delete win_container_;
+    delete win_;
+}
+
+void display_widget::init(std::string title, eka2l1::vec2 size, const std::uint32_t flags) {
+    if (win_) {
+        win_->init(size);
+    }
+
     resize(size.x, size.y);
     change_title(title);
 }
 
-void display_widget::display_widget::make_current() {
-    shared_display_context_->makeCurrent(windowHandle());
+void display_widget::make_current() {
+    if (win_) {
+        win_->make_current();
+    }
 }
 
 void display_widget::done_current() {
-    shared_display_context_->doneCurrent();
+    if (win_) {
+        win_->done_current();
+    }
 }
 
 void display_widget::swap_buffer() {
-    shared_display_context_->swapBuffers(windowHandle());
+    if (win_) {
+        win_->swap_buffer();
+    }
 }
 
 void display_widget::poll_events() {

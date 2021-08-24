@@ -111,26 +111,24 @@ static void mode_change_screen(void *userdata, eka2l1::epoc::screen *scr, const 
     widget->setMinimumSize(new_minsize);
 }
 
-static void draw_emulator_screen(void *userdata, eka2l1::epoc::screen *scr, const bool is_dsa) {
-    eka2l1::desktop::emulator *state_ptr = reinterpret_cast<eka2l1::desktop::emulator *>(userdata);
-    if (!state_ptr) {
+void main_window::draw_emulator_screen() {
+    eka2l1::epoc::screen *scr = get_current_active_screen();
+    if (!scr) {
         return;
     }
 
-    eka2l1::desktop::emulator &state = *state_ptr;
-
-    std::unique_ptr<eka2l1::drivers::graphics_command_list> cmd_list = state.graphics_driver->new_command_list();
-    std::unique_ptr<eka2l1::drivers::graphics_command_list_builder> cmd_builder = state.graphics_driver->new_command_builder(
+    std::unique_ptr<eka2l1::drivers::graphics_command_list> cmd_list = emulator_state_.graphics_driver->new_command_list();
+    std::unique_ptr<eka2l1::drivers::graphics_command_list_builder> cmd_builder = emulator_state_.graphics_driver->new_command_builder(
         cmd_list.get());
 
     eka2l1::rect viewport;
     eka2l1::rect src;
     eka2l1::rect dest;
 
-    eka2l1::drivers::filter_option filter = state.conf.nearest_neighbor_filtering ? eka2l1::drivers::filter_option::nearest : eka2l1::drivers::filter_option::linear;
+    eka2l1::drivers::filter_option filter = emulator_state_.conf.nearest_neighbor_filtering ? eka2l1::drivers::filter_option::nearest : eka2l1::drivers::filter_option::linear;
 
-    const auto window_width = state.window->window_fb_size().x;
-    const auto window_height = state.window->window_fb_size().y;
+    const auto window_width = emulator_state_.window->window_fb_size().x;
+    const auto window_height = emulator_state_.window->window_fb_size().y;
 
     eka2l1::vec2 swapchain_size(window_width, window_height);
     viewport.size = swapchain_size;
@@ -138,7 +136,7 @@ static void draw_emulator_screen(void *userdata, eka2l1::epoc::screen *scr, cons
 
     cmd_builder->backup_state();
 
-    eka2l1::vecx<std::uint8_t, 4> color_clear = eka2l1::common::rgba_to_vec(state.conf.display_background_color.load());
+    eka2l1::vecx<std::uint8_t, 4> color_clear = eka2l1::common::rgba_to_vec(emulator_state_.conf.display_background_color.load());
 
     // The format that is stored is same as how it's present in HTML ARGB (from lowest to highest bytes)
     // The normal one that emulator assumes is ABGR (from lowest to highest bytes too)
@@ -206,11 +204,10 @@ static void draw_emulator_screen(void *userdata, eka2l1::epoc::screen *scr, cons
 
     int wait_status = -100;
 
-    // Submit, present, and wait for the presenting
+    // Submit, present, and wait for the presenting.
+    // This seems to be executed synchronously, so no need to wait to create deadlock
     cmd_builder->present(&wait_status);
-
-    state.graphics_driver->submit_command_list(*cmd_list);
-    state.graphics_driver->wait_for(&wait_status);
+    emulator_state_.graphics_driver->execute_command_list(*cmd_list);
 }
 
 main_window::main_window(QApplication &application, QWidget *parent, eka2l1::desktop::emulator &emulator_state)
@@ -239,7 +236,13 @@ main_window::main_window(QApplication &application, QWidget *parent, eka2l1::des
     }
 
     displayer_ = new display_widget(this);
+
     displayer_->setVisible(false);
+    displayer_->repaint_request = [this]() {
+        if (this->displayer_->isVisible()) {
+            this->draw_emulator_screen();
+        }
+    };
 
     ui_->layout_main->addWidget(displayer_);
 
@@ -801,7 +804,6 @@ void main_window::setup_screen_draw() {
         eka2l1::epoc::screen *scr = get_current_active_screen();
         if (scr) {
             active_screen_draw_callback_ = scr->add_screen_redraw_callback(&emulator_state_, [this](void *userdata, eka2l1::epoc::screen *scr, const bool is_dsa) {
-                draw_emulator_screen(userdata, scr, is_dsa);
                 emit status_bar_update(scr->last_fps);
             });
 
@@ -967,19 +969,6 @@ void main_window::on_package_install_clicked() {
 
 void main_window::resizeEvent(QResizeEvent *event) {
     QWidget::resizeEvent(event);
-
-    // Only care to redraw if displayer is active
-    if (!displayer_->isVisible()) {
-        return;
-    }
-
-    eka2l1::system *system = emulator_state_.symsys.get();
-    if (system) {
-        eka2l1::epoc::screen *scr = get_current_active_screen();
-        if (scr) {
-            draw_emulator_screen(&emulator_state_, scr, true);
-        }
-    }
 }
 
 void main_window::dragEnterEvent(QDragEnterEvent *event) {

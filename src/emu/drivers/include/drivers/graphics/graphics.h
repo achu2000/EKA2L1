@@ -137,6 +137,8 @@ namespace eka2l1::drivers {
          * \param command_list     Command list to submit.
          */
         virtual void submit_command_list(graphics_command_list &command_list) = 0;
+
+        virtual void execute_command_list(graphics_command_list &command_list) = 0;
     };
 
     using graphics_driver_ptr = std::unique_ptr<graphics_driver>;

@@ -104,6 +104,7 @@ private:
 
     void save_ui_layouts();
     void restore_ui_layouts();
+    void draw_emulator_screen();
 
 private slots:
     void on_about_triggered();

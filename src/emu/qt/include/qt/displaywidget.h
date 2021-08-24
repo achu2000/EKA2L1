@@ -21,19 +21,48 @@
 #define DISPLAY_WIDGET_H
 
 #include <QOpenGLContext>
+#include <QOffscreenSurface>
 #include <QWidget>
+#include <QWindow>
+
+#include <functional>
+
 #include <drivers/graphics/emu_window.h>
 
-class display_window_widget;
+class display_widget;
+
+class display_window : public QWindow {
+protected:
+    QOpenGLContext *display_context_;
+    QOpenGLContext *shared_display_context_;
+
+    QOffscreenSurface *offscreen_surface_;
+
+    display_widget *container_;
+
+    bool main_made_;
+
+public:
+    explicit display_window(QWindow *parent, display_widget *container);
+    ~display_window();
+
+    bool event(QEvent *event) override;
+    void exposeEvent(QExposeEvent *event) override;
+
+    void init(eka2l1::vec2 size);
+    void make_current();
+    void done_current();
+    void swap_buffer();
+};
 
 class display_widget : public QWidget, public eka2l1::drivers::emu_window {
     Q_OBJECT
 
 private:
-    void *userdata_;
+    display_window *win_;
+    QWidget *win_container_;
 
-    QOpenGLContext *display_context_;
-    QOpenGLContext *shared_display_context_;
+    void *userdata_;
 
 public:
     explicit display_widget(QWidget *parent = nullptr);
@@ -63,10 +92,6 @@ public:
     bool set_cursor(eka2l1::drivers::cursor *cur) override;
     void cursor_visiblity(const bool visi) override;
     bool cursor_visiblity() override;
-
-    QOpenGLContext *get_parent_context() {
-        return display_context_;
-    }
 
     QPaintEngine *paintEngine() const override {
         return nullptr;
