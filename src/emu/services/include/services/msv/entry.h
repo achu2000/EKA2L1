@@ -63,10 +63,14 @@ namespace eka2l1::epoc::msv {
         sqlite3_stmt *create_entry_stmt_;
         sqlite3_stmt *visible_folder_find_stmt_;
         sqlite3_stmt *find_entry_stmt_;
+        sqlite3_stmt *query_child_entries_stmt_;
 
         std::uint32_t id_counter_;
 
         bool load_or_create_databases();
+        bool collect_children_entries(const msv_id parent_id, std::vector<entry> &entries);
+        void fill_entry_information(entry &ent, sqlite3_stmt *stmt, const bool have_extra_id = false);
+
         msv_id get_suitable_visible_parent_id(const msv_id parent_id);
 
     public:

@@ -68,9 +68,9 @@ namespace eka2l1::epoc::msv {
 
         if (!no_need_look_too_much) {
             for (std::size_t i = start_index; i <= end_index; i++) {
-                if (std::binary_search(entries_.begin(), entries_.end(), ents[i], [](const entry &lhs, const entry &rhs) {
+                if (!std::binary_search(entries_.begin(), entries_.end(), ents[i], [](const entry &lhs, const entry &rhs) {
                     return lhs.id_ < rhs.id_;
-                } == entries_.end())) {
+                })) {
                     // Continue with our lifes
                     entries_.push_back(ents[i]);
                 }
@@ -108,7 +108,7 @@ namespace eka2l1::epoc::msv {
     bool entry_range_table::update_child_id(const msv_id parent_id, const msv_id child_id, const bool is_add) {
         entry *parent_obj = get(parent_id);
         if (!parent_obj) {
-            return;
+            return false;
         }
 
         const bool see_me = std::binary_search(parent_obj->children_ids_.begin(), parent_obj->children_ids_.end(), child_id);

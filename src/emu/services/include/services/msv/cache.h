@@ -117,11 +117,9 @@ namespace eka2l1::epoc::msv {
         void clear_tables();
         bool update_child_id(const msv_id parent_id, const msv_id child_id, const bool is_add);
 
-        friend struct indexer_link;
-
+    public:
         common::double_linked_queue_element indexer_link_;
 
-    public:
         explicit visible_folder(const msv_id my_id);
         ~visible_folder();
 

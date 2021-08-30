@@ -112,7 +112,7 @@ namespace eka2l1::epoc::msv {
             return !(data_ & DATA_FLAG_INVISIBLE);
         }
 
-        void visible(const bool value) const {
+        void visible(const bool value) {
             data_ &= ~DATA_FLAG_INVISIBLE;
             if (!value) {
                 data_ |= DATA_FLAG_INVISIBLE;

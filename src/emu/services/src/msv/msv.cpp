@@ -327,6 +327,7 @@ namespace eka2l1 {
     }
 
     static void pack_entry_to_buffer(common::chunkyseri &seri, epoc::msv::entry &ent) {
+        /*
         epoc::msv::entry_data data_str;
         data_str.data_ = ent.data_;
         data_str.date_ = common::convert_microsecs_epoch_to_1ad(ent.time_);
@@ -336,7 +337,7 @@ namespace eka2l1 {
         data_str.mtm_uid_ = ent.mtm_uid_;
         data_str.type_uid_ = ent.type_uid_;
 
-        seri.absorb_impl(reinterpret_cast<std::uint8_t *>(&data_str), sizeof(epoc::msv::entry_data));
+        seri.absorb_impl(reinterpret_cast<std::uint8_t *>(&data_str), sizeof(epoc::msv::entry_data));*/
 
         pad_out_data(seri);
         seri.absorb(ent.description_);

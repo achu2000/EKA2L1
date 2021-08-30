@@ -178,7 +178,7 @@ namespace eka2l1::epoc::msv {
         common::double_linked_queue_element *end = folders_.end();
 
         do {
-            visible_folder *folder = E_LOFF(first, visible_folder, index_link_);
+            visible_folder *folder = E_LOFF(first, visible_folder, indexer_link_);
             if (folder->id() == ent.visible_id_) {
                 return folder->add(ent);
             }
@@ -190,7 +190,7 @@ namespace eka2l1::epoc::msv {
         visible_folder *new_folder = new visible_folder(ent.visible_id_);
         entry *fin = new_folder->add(ent);
 
-        folders_.push(nwe_folder);
+        folders_.push(&new_folder->indexer_link_);
 
         return fin;
     }
@@ -205,7 +205,7 @@ namespace eka2l1::epoc::msv {
         common::double_linked_queue_element *end = folders_.end();
 
         do {
-            visible_folder *folder = E_LOFF(first, visible_folder, index_link_);
+            visible_folder *folder = E_LOFF(first, visible_folder, indexer_link_);
             if (auto result = folder->get_entry(id)) {
                 result;
             }
@@ -222,6 +222,7 @@ namespace eka2l1::epoc::msv {
         , create_entry_stmt_(nullptr)
         , visible_folder_find_stmt_(nullptr)
         , find_entry_stmt_(nullptr)
+        , query_child_entries_stmt_(nullptr)
         , id_counter_(MSV_FIRST_FREE_ENTRY_ID) {
         load_or_create_databases();
     }
@@ -237,6 +238,10 @@ namespace eka2l1::epoc::msv {
 
         if (find_entry_stmt_) {
             sqlite3_finalize(find_entry_stmt_);
+        }
+
+        if (query_child_entries_stmt_) {
+            sqlite3_finalize(query_child_entries_stmt_);
         }
 
         if (database_) {
@@ -320,7 +325,7 @@ namespace eka2l1::epoc::msv {
         const char *MAX_ID_GET_STM = "SELECT MAX(id) FROM IndexEntry;";
         sqlite3_stmt *max_id_get_stmt_obj = nullptr;
         
-        if (sqlite3_prepare(database_, MAX_ID_GET_STM, sizeof(MAX_ID_GET_STM), &max_id_get_stmt_obj, nullptr) == SQLITE_OK) {
+        if (sqlite3_prepare(database_, MAX_ID_GET_STM, -1, &max_id_get_stmt_obj, nullptr) == SQLITE_OK) {
             const int res = sqlite3_step(max_id_get_stmt_obj);
             if (res == SQLITE_OK) {
                 // Well, we got one result, let's see it
@@ -349,8 +354,7 @@ namespace eka2l1::epoc::msv {
         // Conduct a search in the database
         if (!visible_folder_find_stmt_) {
             const char *FIND_SUITABLE_VISIBLE_PARENT_STMT = "SELECT data, visibleParent FROM IndexEntry WHERE id=:parentId";
-            if (sqlite3_prepare(database_, FIND_SUITABLE_VISIBLE_PARENT_STMT, sizeof(FIND_SUITABLE_VISIBLE_PARENT_STMT),
-                &visible_folder_find_stmt_, nullptr) != SQLITE_OK) {
+            if (sqlite3_prepare(database_, FIND_SUITABLE_VISIBLE_PARENT_STMT, -1, &visible_folder_find_stmt_, nullptr) != SQLITE_OK) {
                 LOG_ERROR(SERVICE_MSV, "Unable to prepare find visible folder statement!");
                 return 0;
             }
@@ -381,16 +385,16 @@ namespace eka2l1::epoc::msv {
         return result_id;
     }
 
-    bool sql_entry_indexer::add_entry(entry &ent) {
+    entry *sql_entry_indexer::add_entry(entry &ent) {
         if (!create_entry_stmt_) {
             const char *CREATE_ENTRY_STMT_STRING = "INSERT INTO IndexEntry VALUES("
                 ":id, :parentId, :serviceId, :mtmId, :type, :date, :data, :size, :error, :mtmData1,"
                 ":mtmData2, :mtmData3, :relatedId, :bioType, :pcSyncCount, :reserved, :visibleParent,"
                 ":description, :details)";
 
-            if (sqlite3_prepare(database_, CREATE_ENTRY_STMT_STRING, sizeof(CREATE_ENTRY_STMT_STRING), &create_entry_stmt_, nullptr) != SQLITE_OK) {
+            if (sqlite3_prepare(database_, CREATE_ENTRY_STMT_STRING, -1, &create_entry_stmt_, nullptr) != SQLITE_OK) {
                 LOG_ERROR(SERVICE_MSV, "Unable to prepare index entry insert statement!");
-                return false;
+                return nullptr;
             }
         }
 
@@ -399,7 +403,7 @@ namespace eka2l1::epoc::msv {
         // We want to first find a good visible folder for this entry
         const msv_id visible_folder_id = get_suitable_visible_parent_id(ent.parent_id_);
         if (visible_folder_id == 0) {
-            return false;
+            return nullptr;
         }
 
         // Get a new entry slot for us all
@@ -442,12 +446,37 @@ namespace eka2l1::epoc::msv {
 
         if (sqlite3_step(create_entry_stmt_) != SQLITE_DONE) {
             LOG_ERROR(SERVICE_MSV, "Failed to add entry to database!");
-            return false;
+            return nullptr;
         }
 
         id_counter_++;
         
         return entry_indexer::add_entry(ent);
+    }
+
+    void sql_entry_indexer::fill_entry_information(entry &the_entry, sqlite3_stmt *stmt, const bool have_extra_id) {
+        the_entry.parent_id_ = static_cast<std::int32_t>(sqlite3_column_int(stmt, 0));
+        the_entry.service_id_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 1));
+        the_entry.mtm_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 2));
+        the_entry.type_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 3));
+        the_entry.time_ = static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 4));
+        the_entry.data_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 5));
+        the_entry.size_ = static_cast<std::int32_t>(sqlite3_column_int(stmt, 6));
+        the_entry.error_ = static_cast<std::int32_t>(sqlite3_column_int(stmt, 7));
+        the_entry.mtm_datas_[0] = static_cast<std::int32_t>(sqlite3_column_int(stmt, 8));
+        the_entry.mtm_datas_[1] = static_cast<std::int32_t>(sqlite3_column_int(stmt, 9));
+        the_entry.mtm_datas_[2] = static_cast<std::int32_t>(sqlite3_column_int(stmt, 10));
+        the_entry.related_id_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 11));
+        the_entry.bio_type_ = static_cast<std::int32_t>(sqlite3_column_int(stmt, 12));
+        the_entry.pc_sync_count_ = static_cast<std::int32_t>(sqlite3_column_int(stmt, 13));
+        the_entry.reserved_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 14));
+        the_entry.visible_id_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 15));
+        the_entry.description_ = std::u16string(reinterpret_cast<const char16_t*>(sqlite3_column_text16(stmt, 16)));
+        the_entry.details_ = std::u16string(reinterpret_cast<const char16_t*>(sqlite3_column_text16(stmt, 17)));
+
+        if (have_extra_id) {
+            the_entry.id_ = static_cast<std::uint32_t>(sqlite3_column_int(stmt, 18));
+        }
     }
 
     entry *sql_entry_indexer::get_entry(const std::uint32_t id) {
@@ -460,7 +489,7 @@ namespace eka2l1::epoc::msv {
                     "mtmData2, mtmData3, relatedId, bioType, pcSyncCount, reserved, visibleParent,"
                     "description, details from IndexEntry WHERE id=:id";
 
-                if (sqlite3_prepare(database_, FIND_ENTRY_STR_STM, sizeof(FIND_ENTRY_STR_STM), &find_entry_stmt_, nullptr) != SQLITE_OK) {
+                if (sqlite3_prepare(database_, FIND_ENTRY_STR_STM, -1, &find_entry_stmt_, nullptr) != SQLITE_OK) {
                     LOG_ERROR(SERVICE_MSV, "Unable to prepare find entry statement!");
                     return false;
                 }
@@ -481,30 +510,56 @@ namespace eka2l1::epoc::msv {
             // There should be no possbility of duplicated entries. But in case, only take the first one
             entry the_entry;
             the_entry.id_ = id;
-            the_entry.parent_id_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 0));
-            the_entry.service_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 1));
-            the_entry.mtm_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 2));
-            the_entry.type_uid_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 3));
-            the_entry.time_ = static_cast<std::uint64_t>(sqlite3_column_int64(find_entry_stmt_, 4));
-            the_entry.data_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 5));
-            the_entry.size_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 6));
-            the_entry.error_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 7));
-            the_entry.mtm_datas_[0] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 8));
-            the_entry.mtm_datas_[1] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 9));
-            the_entry.mtm_datas_[2] = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 10));
-            the_entry.related_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 11));
-            the_entry.bio_type_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 12));
-            the_entry.pc_sync_count_ = static_cast<std::int32_t>(sqlite3_column_int(find_entry_stmt_, 13));
-            the_entry.reserved_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 14));
-            the_entry.visible_id_ = static_cast<std::uint32_t>(sqlite3_column_int(find_entry_stmt_, 15));
-            the_entry.description_ = std::u16string(reinterpret_cast<char16_t*>(sqlite3_column_text16(find_entry_stmt_, 16)));
-            the_entry.details_ = std::u16string(reinterpret_cast<char16_t*>(sqlite3_column_text16(find_entry_stmt_, 17)));
+            
+            fill_entry_information(the_entry, find_entry_stmt_);
 
             // Add to cache and receive the temporary pointer to it.
             return entry_indexer::add_entry(the_entry);
         }
 
         return nullptr;
+    }
+
+    bool sql_entry_indexer::collect_children_entries(const msv_id parent_id, std::vector<entry> &entries) {
+        if (!query_child_entries_stmt_) {
+            static const char *QUERY_CHILD_ENTRIES_STM_STR = "SELECT parentId, serviceId, mtmId, type, date, data, size, error, mtmData1,"
+                    "mtmData2, mtmData3, relatedId, bioType, pcSyncCount, reserved, visibleParent,"
+                    "description, details, id from IndexEntry WHERE parentId=:parent_id";
+
+            if (sqlite3_prepare(database_, QUERY_CHILD_ENTRIES_STM_STR, -1, &query_child_entries_stmt_, nullptr) != SQLITE_OK) {
+                LOG_ERROR(SERVICE_MSV, "Can't prepare collect children IDs statement!");
+                return false;
+            }
+        }
+
+        sqlite3_reset(query_child_entries_stmt_);
+        if (sqlite3_bind_int(query_child_entries_stmt_, 1, parent_id) != SQLITE_OK) {
+            LOG_ERROR(SERVICE_MSV, "Can't bind parent id to query children ids statement!");
+            return false;
+        }
+
+        do {
+            int result = sqlite3_step(query_child_entries_stmt_);
+            if (result == SQLITE_DONE) {
+                return true;
+            }
+
+            if (result != SQLITE_OK) {
+                break;
+            }
+
+            if (sqlite3_column_count(query_child_entries_stmt_) != 19) {
+                LOG_ERROR(SERVICE_MSV, "Query children entries statement is corrupted!");
+                break;
+            }
+
+            entry an_entry;
+            fill_entry_information(an_entry, query_child_entries_stmt_, true);
+
+            entries.push_back(std::move(an_entry));
+        } while (true);
+
+        return false;
     }
 
     std::vector<entry *> sql_entry_indexer::get_entries_by_parent(const std::uint32_t parent_id) {
@@ -521,10 +576,48 @@ namespace eka2l1::epoc::msv {
             visible_folder *ff = E_LOFF(first, visible_folder, indexer_link_);
             if (ff->id() == visible_folder_id) {
                 entries = ff->get_children_by_parent(parent_id, &error);
-                if (error == visible_folder_children_query_no_child_id_array) {
-
-                } else if (error == visible_folder_children_incomplete) {
+                if (error == visible_folder_children_incomplete) {
                     // Query all entries and then do transformation
+                    std::vector<entry> queries;
+                    if (!collect_children_entries(visible_folder_id, queries)) {
+                        LOG_ERROR(SERVICE_MSV, "Unable to query visible folder children entries from database!");
+                        break;
+                    }
+
+                    // Add them to the folder
+                    ff->add_entry_list(queries, true);
+                }
+
+                if ((parent_id != visible_folder_id) && (error != visible_folder_children_query_ok)) {
+                    // Need to do another query
+                    std::vector<entry> queries;
+                    if (!collect_children_entries(parent_id, queries)) {
+                        LOG_ERROR(SERVICE_MSV, "Unable to query visible folder children entries from database!");
+                        break;
+                    }
+
+                    entry *parent_entry = ff->get_entry(parent_id);
+                    if (!parent_entry) {
+                        LOG_ERROR(SERVICE_MSV, "Parent entry still doesn't exist!");
+                        break;
+                    }
+
+                    for (std::size_t i = 0; i < queries.size(); i++) {
+                        parent_entry->children_ids_.push_back(queries[i].id_);
+                    }
+
+                    parent_entry->children_looked_up(true);
+                    ff->add_entry_list(queries);
+                }
+
+                // Reattempt this time again
+                if (error != visible_folder_children_query_ok) {
+                    entries = ff->get_children_by_parent(parent_id, &error);
+
+                    if (error != visible_folder_children_query_ok) {
+                        LOG_ERROR(SERVICE_MSV, "An error occured that made it unable to retrieve children entries");
+                        break;
+                    }
                 }
             }
 
